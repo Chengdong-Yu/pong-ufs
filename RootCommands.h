@@ -182,10 +182,11 @@ static IOReturn hostScsiDir (uint8_t lun, const uint8_t *cdb, unsigned cdbLength
   if (!cdb || !cdbLength || cdbLength > 16 || dataBytes > kDataMax ||
       (direction != 0 && direction != 1 && direction != 2) ||
       (dataBytes & 3) || (dataBytes ? !direction : direction)) return kIOReturnBadArgument;
-  bool allowed = (cdb[0] == 0x00 && !direction && cdbLength == 6 && lun == 0) ||
+  const bool readableLun=lun==0||lun==kPongFactoryNvLun;
+  bool allowed = (cdb[0] == 0x00 && !direction && cdbLength == 6 && readableLun) ||
                  (cdb[0] == 0x1b && !direction && cdbLength == 6 && lun == 0xd0 && cdb[4] == 0x10) ||
-                 (cdb[0] == 0x25 && direction == 2 && cdbLength == 10 && dataBytes == 8 && lun == 0) ||
-                 (cdb[0] == 0x28 && direction == 2 && cdbLength == 10 && lun == 0) ||
+                 (cdb[0] == 0x25 && direction == 2 && cdbLength == 10 && dataBytes == 8 && readableLun) ||
+                 (cdb[0] == 0x28 && direction == 2 && cdbLength == 10 && readableLun) ||
                  // APFS commits issue doSynchronize/barrier after their writes.
                  // Accept the exact whole-LUN, non-IMMED CDB produced below;
                  // rejecting 0x35 here makes tx_flush return ENOTSUP (45),
@@ -274,8 +275,9 @@ static IOReturn hostQueryRead (uint8_t opcode, uint8_t idn, uint32_t *value)
 static IOReturn hostRead4kLocked (uint8_t lun, uint64_t lba, uint32_t blocks)
 {
   if (!gHost.ready || gHost.poisoned) return kIOReturnNotReady;
+  const uint64_t capacity=lun==0?gHost.blocks:lun==kPongFactoryNvLun?gHost.factoryBlocks:0;
   if (!blocks || blocks > kDataMax / 4096 || lba > 0xffffffffULL - (blocks - 1) ||
-      lba + blocks > gHost.blocks) {
+      !capacity || lba + blocks > capacity) {
     return kIOReturnBadArgument;
   }
   gRootDiagnostic.lba = lba;

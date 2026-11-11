@@ -23,6 +23,7 @@
 #include <pexpert/pexpert.h>
 #include <sys/param.h>
 #include <sys/types.h>
+#include <sys/errno.h>
 #include "../PongProbe.h"
 // Power/USB/WLAN share the Apps SMMU. UFS also builds without that optional
 // aggregate, so weak imports retain the single-owner storage-only profile.
@@ -40,7 +41,7 @@ struct UfsHost {
   uintptr_t hc = 0, smmu = 0, cb = 0;
   IOBufferMemoryDescriptor *dma = nullptr;
   uint8_t *virt = nullptr;
-  uint64_t phys = 0, blocks = 0;
+  uint64_t phys = 0, blocks = 0, factoryBlocks = 0;
   IOLock *lock = nullptr;
   bool ready = false, poisoned = false;
   bool writable = false;
@@ -53,6 +54,10 @@ enum : uint64_t {
   kPongUserdataFirst4k = 0x413248ULL,
   kPongUserdataLast4k = 0x75a40eaULL,
   kRootLogicalBlock = 512,
+  // This Pong's original NV partitions are on SCSI LUN5 (REC sdf).
+  // They are read-only here; no NV WRITE CDB is permitted.
+  kPongFactoryNvLun = 5,
+  kPongFactoryNvBlocks4k = 8192,
 };
 struct RootDiskWindow {
   const char *name;
@@ -69,7 +74,17 @@ static uint32_t read32(uintptr_t base, unsigned offset) {
 }
 static void write32(uintptr_t base, unsigned offset, uint32_t value) {
   __asm__ volatile("dsb sy" ::: "memory");
-  *reinterpret_cast<volatile uint32_t *>(base + offset) = value;
+  // Qualcomm firmware can trap SMMU writes. Its register emulator does
+  // not reliably decode a store sourced from WZR/XZR (Linux arm-smmu.c's
+  // QCOM_DUMMY_VAL workaround documents this). SCTLR must really receive
+  // zero, so move the value into a writable GPR before the actual store.
+  // An early-clobber output cannot be allocated to the zero register;
+  // retaining the explicit MOV also prevents constant folding to STR WZR.
+  uint32_t registerValue;
+  __asm__ volatile("mov %w0, %w1\n\tstr %w0, [%2]"
+                   : "=&r"(registerValue)
+                   : "r"(value), "r"(base + offset)
+                   : "memory");
   __asm__ volatile("dsb sy" ::: "memory");
 }
 static uintptr_t mapPhys(uint64_t base, uint64_t size, OSSharedPtr<IOMemoryMap> &keep) {
@@ -113,6 +128,7 @@ static void hostWrite(unsigned offset, uint32_t value) { write32(gHost.hc, offse
 #include "RootQueue.h"
 #include "RootCommands.h"
 #include "RootLayout.h"
+#include "FactoryNv.h"
 
 static bool transportFailure(const char *why) {
   gHost.ready = false;
@@ -192,6 +208,7 @@ static bool hostBringUp() {
   gRootDiagnostic.cbar = read(0x1000 + 4 * plan.bank); gRootDiagnostic.cba2r = read(0x1800 + 4 * plan.bank);
   gRootDiagnostic.sctlr = read32(gHost.cb, 0);
   if (why) return transportFailure(why);
+  IOLog("PONG_UFS: exact SID e0 context ready bank=%u VA64=1; real register readback complete\n", plan.bank);
   } // Release before queue commands or storage readiness notifications.
   gRootDiagnostic.stage = "request list start";
   if (!hostStartQueue(&why)) return transportFailure(why);
@@ -449,12 +466,16 @@ bool PongUfsBlock::start(IOService *provider) {
   gRootDiagnostic.stage = "first root read";
   if (hostRead4k(0, window.baseByte / 4096, 1, bounce) != kIOReturnSuccess)
     return transportFailure("first root read");
-  const bool expected = !memcmp(bounce + window.signatureOffset, window.signature, strlen(window.signature));
-  // New restores publish a raw APFS OS container, while older OS inputs use
-  // a GPT disk. Both are actual media formats handled by IOStorage/APFS.
-  const bool rawApfsRoot = !strcmp(window.name, "OS") && !memcmp(bounce + 32, "NXSB", 4) &&
-    OSReadLittleInt32(bounce, 36) == 4096;
-  if (!expected && !rawApfsRoot) {
+  // The actual 22G100 OS is raw APFS, while its prepared SystemOS and the
+  // persistent Data are GPT disks. Older SystemOS used raw APFS. Recognize
+  // the real format independently for every declared window; the old
+  // per-window signature default must not reject a valid new SystemOS.
+  const bool gpt = !memcmp(bounce + 512, "EFI PART", 8);
+  const uint64_t apfsBlocks = OSReadLittleInt64(bounce, 40);
+  const bool rawApfs = !memcmp(bounce + 32, "NXSB", 4) &&
+    OSReadLittleInt32(bounce, 36) == 4096 && apfsBlocks &&
+    apfsBlocks <= window.size / 4096;
+  if (!gpt && !rawApfs) {
     // Invalid filesystem contents belong to this window, not to the shared
     // UFS controller. Do not invalidate already published OS/SystemOS disks.
     IOLog("PONG_UFS: %s window has no supported filesystem header base=%llx bytes=%llx; media not published\n",
@@ -476,6 +497,7 @@ bool PongUfsBlock::start(IOService *provider) {
   setProperty("PongRootWindow", !strcmp(window.name, "OS"));
   setProperty("PongSystemOSWindow", !strcmp(window.name, "SystemOS"));
   setProperty("PongDataWindow", !strcmp(window.name, "Data"));
+  setProperty("PongWindowBytes", window.size, 64);
   setProperty("Physical Interconnect", "UFS");
   online = true; registerService();
   char detail[96];
@@ -618,3 +640,8 @@ extern "C" bool pong_ufs_transport_start(IOService *provider) {
 }
 
 extern "C" bool pong_ufs_ready(void) { return __atomic_load_n(&gWifiUfsReady,__ATOMIC_ACQUIRE)!=0; }
+
+extern "C" int pong_ufs_factory_nv(unsigned slot,uint64_t offset,void *destination,
+                                    uint32_t bytes,uint64_t *total) {
+  return factoryNvRead(slot,offset,destination,bytes,total);
+}

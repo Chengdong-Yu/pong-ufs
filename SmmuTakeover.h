@@ -123,7 +123,10 @@ static const char *configureUfsSmmu(const UfsSmmuPlan &p, uint16_t stream, Read 
 {
   if (p.error) return p.error;
   unsigned cb = (p.pages + p.bank) * 4096;
-  if (!p.reuse) write(cb, 0);
+  // The planner has already excluded enabled banks. Do not issue a
+  // redundant trapped SCTLR store to a bank that is actually all-zero;
+  // retain the readback below, and really clear nonzero disabled controls.
+  if (!p.reuse && read(cb) != 0) write(cb, 0);
   if (read(cb) != 0) return "SMMU bypass disable readback";
   // Set VA64 before exposing a newly allocated stream. Repair an exclusive
   // existing 32-bit bypass too; do not silently reuse the faulty state.
