@@ -115,6 +115,9 @@ static void registrationReport (void *, wait_result_t)
 static bool probeFailure (const char *reason, uint64_t detail = 0)
 {
   native_ufs_status |= 0x80000000U;
+  // Report the failed validation in the console as well as the probe table.
+  IOLog ("PONG_UFS: probe failure: %s detail=0x%llx\n", reason,
+         (unsigned long long) detail);
   PongProbeRecord (0, "ufs-registers", PongProbeFail, reason, detail);
   return false;
 }
