@@ -464,8 +464,6 @@ bool PongUfsBlock::start(IOService *provider) {
     PongProbeRecord(4, "ufs-transport", PongProbeFail, detail, window.baseByte);
     return false;
   }
-  gRootDiagnostic.first = kPongUserdataFirst4k;
-  gRootDiagnostic.last = kPongUserdataLast4k;
   gRootDiagnostic.windowBytes = window.size;
   const bool writableWindow = gHost.writable && !(window.baseByte & 4095) && !(window.size & 4095);
   IOLog("PONG_UFS: SHNGROOT %s first read complete signature=1 base=%llx bytes=%llx; publish 512-byte %s disk\n",
@@ -576,9 +574,17 @@ extern "C" bool pong_ufs_transport_start(IOService *provider) {
   RootLayout layout;
   const char *why = nullptr;
   if (!findRootLayout(&layout, &why)) return transportFailure(why);
-  if (layout.userdataFirst != kPongUserdataFirst4k || layout.userdataLast != kPongUserdataLast4k ||
+  uint64_t expectedFirst = kPongUserdataFirst4k;
+  uint64_t expectedLast = kPongUserdataLast4k;
+  const bool firstProvided = PE_parse_boot_argn("pong_ufs_userdata_first_4k", &expectedFirst,
+                                               sizeof(expectedFirst));
+  const bool lastProvided = PE_parse_boot_argn("pong_ufs_userdata_last_4k", &expectedLast,
+                                              sizeof(expectedLast));
+  if (firstProvided != lastProvided || !expectedFirst || expectedFirst > expectedLast)
+    return transportFailure("invalid userdata geometry boot arguments");
+  if (layout.userdataFirst != expectedFirst || layout.userdataLast != expectedLast ||
       layout.userdataLast >= gHost.blocks)
-    return transportFailure("Pong userdata geometry changed");
+    return transportFailure("userdata geometry changed");
   if (layout.manifestStatus) return transportFailure("invalid SHNGROOT manifest/hash/bounds");
   static const struct { const char *name, *product, *signature; unsigned offset; } wanted[] = {
     {"OS", "Pong OS root", "EFI PART", 512},

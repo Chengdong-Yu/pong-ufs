@@ -8,6 +8,8 @@ SM8475 UFS 主控制器传输层与 SMMU takeover：只发只读存储命令，�
 - SMMU stream ID `0xe0`，UFS 中断 SPI 265
 - 根布局只接受 SHNGROOT v1，强制 OS / SystemOS / Data 三个窗口，块大小 512、flags 1
 
+- userdata GPT 的起止 LBA 默认采用 Pong 的布局。共用此驱动的其他板型可同时设置 `pong_ufs_userdata_first_4k` 和 `pong_ufs_userdata_last_4k`。两个值是包含边界的 4 KiB LBA。实测 GPT 必须与该范围匹配，并通过容量与清单检查后才会发布磁盘窗口。
+
 ## 仓库关系
 
 Pong 专属实现，上游没有对应组件（`UniXNU/ShengUfs` 是 SM8550 的另一套）。
